@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+browser_profile/
+seen.json
+deals.csv
