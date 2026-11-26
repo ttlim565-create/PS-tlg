@@ -5,7 +5,8 @@
 
 环境变量(都可选):
   PLATFORMS  默认 "amazon,shopee,lazada"，GitHub 上用 "amazon"
-  KEYWORDS   逗号分隔
+  KEYWORDS_DEAL / KEYWORDS_ERROR  两套关键词，逗号分隔
+  DEAL_*  / ERROR_*  两套阈值 (MIN_DISCOUNT / ABS_LOW / MIN_MARKET)
   TG_TOKEN / TG_CHAT  Telegram 通知
 """
 import csv, json, os, re, statistics, time, urllib.parse, urllib.request
@@ -14,13 +15,32 @@ from playwright.sync_api import sync_playwright
 # ================= 配置 =================
 CI = os.getenv("CI_MODE") == "1"
 PLATFORMS = [p.strip() for p in os.getenv("PLATFORMS", "amazon,shopee,lazada").split(",") if p.strip()]
-KEYWORDS = [k.strip() for k in os.getenv("KEYWORDS", "water bottle,kettle,earphones,power bank").split(",") if k.strip()]
 AMAZON_DOMAIN = "amazon.sg"       # 价格 S$
 SHOPEE_DOMAIN = "shopee.com.my"   # 价格 RM
 LAZADA_DOMAIN = "lazada.com.my"   # 价格 RM
-MIN_DISCOUNT = float(os.getenv("MIN_DISCOUNT", "0.55"))               # 相对「市场中位价」的真实折扣阈值
-ABS_LOW_PRICE = float(os.getenv("ABS_LOW_PRICE", "2.0"))               # 真实价格 <= 此值也提醒 (含0元)
-MIN_MARKET_PRICE = float(os.getenv("MIN_MARKET_PRICE", "15.0"))           # 市场中位价低于此值的品类忽略
+
+
+def _kw(name, default):
+    return [k.strip() for k in os.getenv(name, default).split(",") if k.strip()]
+
+
+def _f(name, default):
+    return float(os.getenv(name, default))
+
+
+# 两种模式: 普通优惠(日常好价/高折扣) 和 价格错误(贵价货被错标成极低价)
+PROFILES = [
+    {"name": "普通优惠", "icon": "🔥",
+     "keywords": _kw("KEYWORDS_DEAL", "water bottle,kettle,earphones,power bank"),
+     "min_discount": _f("DEAL_MIN_DISCOUNT", "0.55"),
+     "abs_low": _f("DEAL_ABS_LOW", "2"),
+     "min_market": _f("DEAL_MIN_MARKET", "15")},
+    {"name": "价格错误", "icon": "🚨",
+     "keywords": _kw("KEYWORDS_ERROR", "airpods pro,sony headphones,nintendo switch,dyson vacuum,laptop,iphone,ps5,gopro"),
+     "min_discount": _f("ERROR_MIN_DISCOUNT", "0.70"),
+     "abs_low": _f("ERROR_ABS_LOW", "0"),
+     "min_market": _f("ERROR_MIN_MARKET", "100")},
+]
 MAX_DETAIL_CHECKS = 10            # 每个平台每个关键词最多进多少个商品页
 INTERVAL_MIN = 20                 # 本地循环间隔(分钟)
 HEADLESS = True if CI else False
@@ -304,7 +324,7 @@ def save_deal(row):
         w.writerow(row)
 
 
-def scan(page, platform, kw, seen):
+def scan(page, platform, kw, seen, cfg):
     search, detail = ADAPTERS[platform]
     items = [i for i in search(page, kw) if i["list_price"] is not None]
     core = [i for i in items if not i.get("extra")]
@@ -312,7 +332,7 @@ def scan(page, platform, kw, seen):
         print(f"[{platform}] '{kw}' 结果太少({len(core)})，跳过(可能被拦截)")
         return
     market = statistics.median([i["list_price"] for i in core if i["list_price"] > 0] or [0])
-    if market < MIN_MARKET_PRICE:
+    if market < cfg["min_market"]:
         print(f"[{platform}] '{kw}' 市场中位价 {market:.2f} 太低，跳过")
         return
     cands = []
@@ -322,10 +342,10 @@ def scan(page, platform, kw, seen):
         if platform == "amazon" and not relevant(i["name"], kw):
             continue
         shown = (1 - i["list_price"] / i["was"]) if i.get("was") else 0
-        if i["list_price"] <= ABS_LOW_PRICE or i["list_price"] <= market * (1 - MIN_DISCOUNT) or shown >= MIN_DISCOUNT:
+        if i["list_price"] <= cfg["abs_low"] or i["list_price"] <= market * (1 - cfg["min_discount"]) or shown >= cfg["min_discount"]:
             cands.append(i)
     cands.sort(key=lambda i: i["list_price"])
-    print(f"[{platform}] '{kw}' 市场中位价 {market:.2f}，候选 {len(cands)} 个")
+    print(f"[{cfg['name']}|{platform}] '{kw}' 市场中位价 {market:.2f}，候选 {len(cands)} 个")
     for it in cands[:MAX_DETAIL_CHECKS]:
         it["kw"] = kw
         price, note = detail(page, it)
@@ -334,8 +354,8 @@ def scan(page, platform, kw, seen):
             print("  跳过:", it["name"][:40], "-", note)
             continue
         disc = 1 - price / market
-        if price <= ABS_LOW_PRICE or disc >= MIN_DISCOUNT:
-            notify(f"🔥[{it['platform']}] {it['name'][:60]}\n真实价 {price:.2f} | 市场中位 {market:.2f} | "
+        if price <= cfg["abs_low"] or disc >= cfg["min_discount"]:
+            notify(f"{cfg['icon']}[{cfg['name']}|{it['platform']}] {it['name'][:60]}\n真实价 {price:.2f} | 市场中位 {market:.2f} | "
                    f"折扣 {disc:.0%}\n{note}\n{it['url']}")
             save_deal([time.strftime("%F %T"), it["platform"], it["name"], round(price, 2),
                        round(market, 2), f"{disc:.0%}", note, it["url"]])
@@ -343,17 +363,18 @@ def scan(page, platform, kw, seen):
 
 
 def run_round(page, seen):
-    for kw in KEYWORDS:
-        for platform in PLATFORMS:
-            if platform not in ADAPTERS:
-                print("未知平台:", platform)
-                continue
-            try:
-                scan(page, platform, kw, seen)
-            except Exception as e:
-                print("出错:", platform, kw, e)
-            json.dump(list(seen), open(SEEN_FILE, "w"))
-            time.sleep(4)
+    for cfg in PROFILES:
+        for kw in cfg["keywords"]:
+            for platform in PLATFORMS:
+                if platform not in ADAPTERS:
+                    print("未知平台:", platform)
+                    continue
+                try:
+                    scan(page, platform, kw, seen, cfg)
+                except Exception as e:
+                    print("出错:", platform, kw, e)
+                json.dump(list(seen), open(SEEN_FILE, "w"))
+                time.sleep(4)
 
 
 def main():

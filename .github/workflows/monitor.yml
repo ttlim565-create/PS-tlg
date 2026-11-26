@@ -37,9 +37,15 @@ jobs:
         env:
           CI_MODE: "1"
           PLATFORMS: "amazon,lazada,shopee"
-          KEYWORDS: "airpods pro,sony headphones,nintendo switch,dyson vacuum,laptop,iphone,samsung galaxy,ps5,gopro,air fryer"
-          MIN_MARKET_PRICE: "100"   # 品类中位价低于这个就不看(只盯贵价货)
-          MIN_DISCOUNT: "0.70"      # 比市场中位价便宜 70% 以上才提醒
-          ABS_LOW_PRICE: "0"        # 不按绝对低价提醒(避免便宜杂物)
+          # 模式一: 普通优惠 (日常好价、高折扣)
+          KEYWORDS_DEAL: "water bottle,kettle,earphones,power bank"
+          DEAL_MIN_DISCOUNT: "0.55"   # 比市场中位价便宜 55% 以上
+          DEAL_ABS_LOW: "2"           # 或真实价 <= 2 也提醒
+          DEAL_MIN_MARKET: "15"       # 品类中位价低于 15 就不看
+          # 模式二: 价格错误 (贵价货被错标成极低价)
+          KEYWORDS_ERROR: "airpods pro,sony headphones,nintendo switch,dyson vacuum,laptop,iphone,ps5,gopro"
+          ERROR_MIN_DISCOUNT: "0.70"  # 便宜 70% 以上
+          ERROR_ABS_LOW: "0"
+          ERROR_MIN_MARKET: "100"     # 只盯中位价 100 以上的品类
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
           TG_CHAT: ${{ secrets.TG_CHAT }}
