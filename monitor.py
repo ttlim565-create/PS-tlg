@@ -125,8 +125,11 @@ def amazon_goto(page, url):
 
 
 # ---------------- Amazon ----------------
-def amazon_search(page, kw):
-    if not amazon_goto(page, f"https://www.{AMAZON_DOMAIN}/s?k={urllib.parse.quote(kw)}"):
+def amazon_search_page(page, kw, sort=None, extra=False):
+    url = f"https://www.{AMAZON_DOMAIN}/s?k={urllib.parse.quote(kw)}"
+    if sort:
+        url += f"&s={sort}"
+    if not amazon_goto(page, url):
         return []
     items = []
     for card in page.query_selector_all('div[data-component-type="s-search-result"]'):
@@ -139,7 +142,19 @@ def amazon_search(page, kw):
         was_el = card.query_selector(".a-price.a-text-price .a-offscreen")
         items.append({"id": f"az{asin}", "name": t.inner_text().strip() if t else "",
                       "list_price": price, "was": to_price(was_el.inner_text() if was_el else ""),
-                      "url": f"https://www.{AMAZON_DOMAIN}/dp/{asin}", "asin": asin, "platform": "Amazon SG"})
+                      "url": f"https://www.{AMAZON_DOMAIN}/dp/{asin}", "asin": asin, "platform": "Amazon SG",
+                      "extra": extra})
+    return items
+
+
+def amazon_search(page, kw):
+    """先按相关度搜(用来算市场中位价)，再按价格从低到高搜(只作候选，专门捞价格错误)"""
+    items = amazon_search_page(page, kw)
+    seen_ids = {i["id"] for i in items}
+    for it in amazon_search_page(page, kw, sort="price-asc-rank", extra=True):
+        if it["id"] not in seen_ids:
+            items.append(it)
+            seen_ids.add(it["id"])
     return items
 
 
@@ -276,10 +291,11 @@ def save_deal(row):
 def scan(page, platform, kw, seen):
     search, detail = ADAPTERS[platform]
     items = [i for i in search(page, kw) if i["list_price"] is not None]
-    if len(items) < 5:
-        print(f"[{platform}] '{kw}' 结果太少({len(items)})，跳过(可能被拦截)")
+    core = [i for i in items if not i.get("extra")]
+    if len(core) < 5:
+        print(f"[{platform}] '{kw}' 结果太少({len(core)})，跳过(可能被拦截)")
         return
-    market = statistics.median([i["list_price"] for i in items if i["list_price"] > 0] or [0])
+    market = statistics.median([i["list_price"] for i in core if i["list_price"] > 0] or [0])
     if market < MIN_MARKET_PRICE:
         print(f"[{platform}] '{kw}' 市场中位价 {market:.2f} 太低，跳过")
         return
