@@ -30,12 +30,12 @@ def _f(name, default):
 
 # 两种模式: 普通优惠(日常好价/高折扣) 和 价格错误(贵价货被错标成极低价)
 PROFILES = [
-    {"name": "普通优惠", "icon": "🔥",
+    {"name": "普通优惠", "title": "OFFER", "icon": "🔥",
      "keywords": _kw("KEYWORDS_DEAL", "water bottle,kettle,earphones,power bank"),
      "min_discount": _f("DEAL_MIN_DISCOUNT", "0.55"),
      "abs_low": _f("DEAL_ABS_LOW", "2"),
      "min_market": _f("DEAL_MIN_MARKET", "15")},
-    {"name": "价格错误", "icon": "🚨",
+    {"name": "价格错误", "title": "PRICE ERROR", "icon": "🚨",
      "keywords": _kw("KEYWORDS_ERROR", "airpods pro,sony headphones,nintendo switch,dyson vacuum,laptop,iphone,ps5,gopro"),
      "min_discount": _f("ERROR_MIN_DISCOUNT", "0.70"),
      "abs_low": _f("ERROR_ABS_LOW", "0"),
@@ -355,8 +355,9 @@ def scan(page, platform, kw, seen, cfg):
             continue
         disc = 1 - price / market
         if price <= cfg["abs_low"] or disc >= cfg["min_discount"]:
-            notify(f"{cfg['icon']}[{cfg['name']}|{it['platform']}] {it['name'][:60]}\n真实价 {price:.2f} | 市场中位 {market:.2f} | "
-                   f"折扣 {disc:.0%}\n{note}\n{it['url']}")
+            notify(f"{cfg['icon']} {cfg['title']} | {it['platform']}\n{it['name'][:80]}\n"
+                   f"价格 {price:.2f} (市场中位 {market:.2f}，便宜 {disc:.0%})\n"
+                   f"{note}\n{it['url']}")
             save_deal([time.strftime("%F %T"), it["platform"], it["name"], round(price, 2),
                        round(market, 2), f"{disc:.0%}", note, it["url"]])
         time.sleep(2)
