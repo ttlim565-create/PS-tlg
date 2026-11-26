@@ -18,9 +18,9 @@ KEYWORDS = [k.strip() for k in os.getenv("KEYWORDS", "water bottle,kettle,earpho
 AMAZON_DOMAIN = "amazon.sg"       # 价格 S$
 SHOPEE_DOMAIN = "shopee.com.my"   # 价格 RM
 LAZADA_DOMAIN = "lazada.com.my"   # 价格 RM
-MIN_DISCOUNT = 0.55               # 相对「市场中位价」的真实折扣阈值
-ABS_LOW_PRICE = 2.0               # 真实价格 <= 此值也提醒 (含0元)
-MIN_MARKET_PRICE = 15.0           # 市场中位价低于此值的品类忽略
+MIN_DISCOUNT = float(os.getenv("MIN_DISCOUNT", "0.55"))               # 相对「市场中位价」的真实折扣阈值
+ABS_LOW_PRICE = float(os.getenv("ABS_LOW_PRICE", "2.0"))               # 真实价格 <= 此值也提醒 (含0元)
+MIN_MARKET_PRICE = float(os.getenv("MIN_MARKET_PRICE", "15.0"))           # 市场中位价低于此值的品类忽略
 MAX_DETAIL_CHECKS = 10            # 每个平台每个关键词最多进多少个商品页
 INTERVAL_MIN = 20                 # 本地循环间隔(分钟)
 HEADLESS = True if CI else False
@@ -28,7 +28,8 @@ PROFILE_DIR = "./browser_profile" # 本地保存登录状态
 TELEGRAM_TOKEN = os.getenv("TG_TOKEN", "")
 TELEGRAM_CHAT = os.getenv("TG_CHAT", "")
 ACCESSORY_WORDS = ["lid", "cover", "cap only", "spare", "replacement", "sticker", "strap", "gasket",
-                   "ring", "compatible with", "refill", "盖", "配件", "贴纸", "替换", "单拍", "补差",
+                   "ring", "compatible with", "refill", "case", "protector", "tempered", "skin",
+                   "pouch", "holder", "adapter only", "for iphone", "for samsung", "for ipad", "盖", "配件", "贴纸", "替换", "单拍", "补差",
                    "邮费", "运费", "postage", "shipping fee"]
 SEEN_FILE, CSV_FILE = "seen.json", "deals.csv"
 # =======================================
@@ -67,9 +68,24 @@ def to_price(text):
     return float(m.group(1).replace(",", "")) if m else None
 
 
-def is_accessory(name):
+def is_accessory(name, kw=""):
+    """标题含配件词则视为配件；关键词里本来就有的词不算(搜 'phone case' 时 case 不是配件)"""
+    n, k = (name or "").lower(), (kw or "").lower()
+    for w in ACCESSORY_WORDS:
+        if w in k:
+            continue
+        if w.isascii():
+            if re.search(r"\b" + re.escape(w) + r"\b", n):
+                return True
+        elif w in n:
+            return True
+    return False
+
+
+def relevant(name, kw):
+    """标题必须包含关键词里的每个词，避免搜 'airpods pro' 却捞到壳/贴纸"""
     n = (name or "").lower()
-    return any(w in n for w in ACCESSORY_WORDS)
+    return all(t in n for t in re.findall(r"[a-z0-9]+", kw.lower()))
 
 
 def capture(page, url, pattern, wait_ms=5000, scroll=True):
@@ -173,7 +189,7 @@ def amazon_detail(page, item):
         return None, "读不到价格"
     notes = []
     t = page.query_selector("#productTitle")
-    if is_accessory(t.inner_text() if t else item["name"]):
+    if is_accessory(t.inner_text() if t else item["name"], item.get("kw", "")):
         notes.append("疑似配件")
     seller = page.query_selector("#merchantInfoFeature_feature_div, #merchant-info")
     if seller:
@@ -301,7 +317,9 @@ def scan(page, platform, kw, seen):
         return
     cands = []
     for i in items:
-        if i["id"] in seen:
+        if i["id"] in seen or is_accessory(i["name"], kw):
+            continue
+        if platform == "amazon" and not relevant(i["name"], kw):
             continue
         shown = (1 - i["list_price"] / i["was"]) if i.get("was") else 0
         if i["list_price"] <= ABS_LOW_PRICE or i["list_price"] <= market * (1 - MIN_DISCOUNT) or shown >= MIN_DISCOUNT:
@@ -309,6 +327,7 @@ def scan(page, platform, kw, seen):
     cands.sort(key=lambda i: i["list_price"])
     print(f"[{platform}] '{kw}' 市场中位价 {market:.2f}，候选 {len(cands)} 个")
     for it in cands[:MAX_DETAIL_CHECKS]:
+        it["kw"] = kw
         price, note = detail(page, it)
         seen.add(it["id"])
         if price is None:

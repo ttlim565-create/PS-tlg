@@ -33,6 +33,9 @@ jobs:
         env:
           CI_MODE: "1"
           PLATFORMS: "amazon"
-          KEYWORDS: "water bottle,kettle,earphones,power bank"
+          KEYWORDS: "airpods pro,sony headphones,nintendo switch,dyson vacuum,laptop,iphone,samsung galaxy,ps5,gopro,air fryer"
+          MIN_MARKET_PRICE: "100"   # 品类中位价低于这个就不看(只盯贵价货)
+          MIN_DISCOUNT: "0.70"      # 比市场中位价便宜 70% 以上才提醒
+          ABS_LOW_PRICE: "0"        # 不按绝对低价提醒(避免便宜杂物)
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
           TG_CHAT: ${{ secrets.TG_CHAT }}
