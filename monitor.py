@@ -261,15 +261,27 @@ def shopee_search(page, kw):
 
 
 def models_real_price(models):
-    ok = [m for m in models if m["stock"] > 0 and m["price"] is not None] or models
-    if not ok:
+    """多规格商品: 返回 (真实可买的最低价, 备注)；规格混着不同商品(如相机+防水壳+电池)时直接跳过。
+    models: [{name, price, stock}]，包含售罄规格——售罄规格用来判断这个链接「主商品」的价格水平。"""
+    valid = [m for m in models if m["price"] is not None and m["price"] > 0]
+    if not valid:
         return None, "无规格数据"
-    main = [m for m in ok if not is_accessory(m["name"])]
-    note = "已排除疑似配件规格" if main and len(main) < len(ok) else ""
-    prices = sorted(m["price"] for m in (main or ok))
-    if len(prices) >= 2 and prices[0] < prices[-1] / 3:
-        return statistics.median(prices), (note + " 规格价差>3倍,取中位价,请人工确认").strip()
-    return prices[0], note
+    in_stock = [m for m in valid if m["stock"] > 0]
+    if not in_stock:
+        return None, "全部规格售罄"
+    main = [m for m in in_stock if not is_accessory(m["name"])]
+    if not main:
+        return None, "在售规格均疑似配件"
+    ref_max = max(m["price"] for m in valid)  # 含售罄规格
+    lo = min(m["price"] for m in main)
+    summary = ""
+    if len(valid) > 1:
+        summary = " | ".join(f"{m['name'][:16]} {m['price']:.0f}" + ("(售罄)" if m["stock"] <= 0 else "")
+                             for m in valid[:6])
+    if len(valid) >= 2 and lo < ref_max / 3:
+        return None, f"规格混合(价差>3倍，疑似含配件/不同商品)，已跳过: {summary}"
+    note = ("已排除疑似配件规格; " if len(main) < len(in_stock) else "") + (f"规格: {summary}" if summary else "")
+    return lo, note.strip()
 
 
 def shopee_detail(page, item):
