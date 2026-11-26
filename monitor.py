@@ -34,12 +34,14 @@ PROFILES = [
      "keywords": _kw("KEYWORDS_DEAL", "water bottle,kettle,earphones,power bank"),
      "min_discount": _f("DEAL_MIN_DISCOUNT", "0.55"),
      "abs_low": _f("DEAL_ABS_LOW", "2"),
-     "min_market": _f("DEAL_MIN_MARKET", "15")},
+     "min_market": _f("DEAL_MIN_MARKET", "15"),
+     "ref_ratio": 0},
     {"name": "价格错误", "title": "PRICE ERROR", "icon": "🚨",
      "keywords": _kw("KEYWORDS_ERROR", "airpods pro,sony headphones,nintendo switch,dyson vacuum,laptop,iphone,ps5,gopro"),
      "min_discount": _f("ERROR_MIN_DISCOUNT", "0.70"),
      "abs_low": _f("ERROR_ABS_LOW", "0"),
-     "min_market": _f("ERROR_MIN_MARKET", "100")},
+     "min_market": _f("ERROR_MIN_MARKET", "100"),
+     "ref_ratio": _f("ERROR_REF_RATIO", "0.5")},  # 商品自己的原价必须 >= 市场中位价的这个比例，否则是另一类商品/配件
 ]
 MAX_DETAIL_CHECKS = 10            # 每个平台每个关键词最多进多少个商品页
 INTERVAL_MIN = 20                 # 本地循环间隔(分钟)
@@ -57,7 +59,7 @@ ACCESSORY_WORDS = ["lid", "cover", "cap only", "spare", "replacement", "sticker"
                    "盖", "配件", "贴纸", "替换", "单拍", "补差", "邮费", "运费", "postage", "shipping fee"]
 # 弱配件词: 很多主商品也会带(如"充电宝自带线")，只在标题前6个词里出现才算配件
 WEAK_ACCESSORY_WORDS = ["cable", "charger", "adapter", "battery", "batteries", "stand", "band", "clip",
-                        "pad", "pads", "tips", "remote", "dock", "bag", "controller", "charging"]
+                        "pad", "pads", "tips", "remote", "dock", "bag", "controller", "charging", "kit"]
 SEEN_FILE, CSV_FILE, HISTORY_FILE = "seen.json", "deals.csv", "history.json"
 ALERT_TTL = float(os.getenv("ALERT_TTL_HOURS", "24")) * 3600  # 同一商品推送后，多久内不再重复推送
 CHECK_TTL = 6 * 3600                                         # 检查过但没达标的商品，多久后再复查
@@ -254,7 +256,8 @@ def shopee_search(page, kw):
             if not b.get("itemid"):
                 continue
             items.append({"id": f"sp{b['shopid']}_{b['itemid']}", "name": b.get("name", ""),
-                          "list_price": (b.get("price_min") or b.get("price") or 0) / 100000, "was": None,
+                          "list_price": (b.get("price_min") or b.get("price") or 0) / 100000,
+                          "was": ((b.get("price_max_before_discount") or b.get("price_before_discount") or 0) / 100000) or None,
                           "url": f"https://{SHOPEE_DOMAIN}/product/{b['shopid']}/{b['itemid']}",
                           "platform": "Shopee MY"})
     return items
@@ -312,12 +315,46 @@ def lazada_search(page, kw):
         try:
             link = it["itemUrl"]
             items.append({"id": f"lz{it.get('itemId') or link}", "name": it.get("name", ""),
-                          "list_price": float(it.get("price") or 0), "was": None,
+                          "list_price": float(it.get("price") or 0), "was": to_price(str(it.get("originalPrice") or "")),
                           "url": ("https:" + link) if link.startswith("//") else link,
                           "platform": "Lazada MY"})
         except Exception:
             continue
     return items
+
+
+def sale_price(pr):
+    """Lazada sku 的 price 字段: 优先 salePrice(售价)；取不到就取里面所有数值的最小值(售价 <= 原价)"""
+    if not isinstance(pr, dict):
+        return None
+    sp = pr.get("salePrice")
+    if isinstance(sp, dict):
+        v = sp.get("value")
+        if v is None:
+            v = to_price(str(sp.get("text") or ""))
+        if v is not None:
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                pass
+    vals = []
+
+    def walk(o):
+        if isinstance(o, dict):
+            for k, v in o.items():
+                if k == "value":
+                    try:
+                        vals.append(float(v))
+                    except (TypeError, ValueError):
+                        pass
+                else:
+                    walk(v)
+        elif isinstance(o, list):
+            for x in o:
+                walk(x)
+
+    walk(pr)
+    return min(vals) if vals else None
 
 
 def lazada_detail(page, item):
@@ -329,9 +366,8 @@ def lazada_detail(page, item):
         for sid, s in skus.items():
             if sid == "0" and len(skus) > 1:
                 continue
-            val = find_key(s.get("price", {}), "value")
             out.append({"name": s.get("skuName") or s.get("name") or "",
-                        "price": float(val) if val is not None else None,
+                        "price": sale_price(s.get("price")),
                         "stock": s.get("stock") if s.get("stock") is not None else 1})
         return models_real_price(out)
     except Exception as e:
@@ -427,6 +463,19 @@ def save_deal(row):
         w.writerow(row)
 
 
+def ref_check(item, market, cfg):
+    """价格错误模式: 商品自己的原价应该接近市场水平；原价本身就远低于市场中位价 = 另一类商品/配件，不是错价"""
+    ratio = cfg.get("ref_ratio", 0)
+    if not ratio:
+        return True, ""
+    was = item.get("was")
+    if not was:
+        return True, "无原价佐证，请人工确认是否真为错价"
+    if was < market * ratio:
+        return False, f"原价{was:.0f}远低于市场中位价{market:.0f}，属另一类商品/配件，非价格错误"
+    return True, ""
+
+
 def scan(page, platform, kw, seen, cfg):
     search, detail = ADAPTERS[platform]
     items = [i for i in search(page, kw) if i["list_price"] is not None]
@@ -448,6 +497,8 @@ def scan(page, platform, kw, seen, cfg):
     for i in items:
         if is_seen(seen, i["id"]) or is_accessory(i["name"], kw):
             continue
+        if not ref_check(i, market, cfg)[0]:
+            continue
         if platform == "amazon" and not relevant(i["name"], kw):
             continue
         shown = (1 - i["list_price"] / i["was"]) if i.get("was") else 0
@@ -467,6 +518,12 @@ def scan(page, platform, kw, seen, cfg):
         record_price(it["id"], price)
         disc = 1 - price / market
         if price <= cfg["abs_low"] or disc >= cfg["min_discount"]:
+            ok, ref_note = ref_check(it, market, cfg)
+            if not ok:
+                print("  跳过:", it["name"][:40], "-", ref_note)
+                continue
+            if ref_note:
+                note = (note + "; " if note else "") + ref_note
             notify(f"{cfg['icon']} {cfg['title']} | {it['platform']}\n{it['name'][:80]}\n"
                    f"价格 {price:.2f} (市场中位 {market:.2f}，便宜 {disc:.0%})\n"
                    f"{history_line(prior.get(it['id']), price)}\n"
