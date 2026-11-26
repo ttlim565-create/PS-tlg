@@ -52,6 +52,8 @@ ACCESSORY_WORDS = ["lid", "cover", "cap only", "spare", "replacement", "sticker"
                    "pouch", "holder", "adapter only", "for iphone", "for samsung", "for ipad", "盖", "配件", "贴纸", "替换", "单拍", "补差",
                    "邮费", "运费", "postage", "shipping fee"]
 SEEN_FILE, CSV_FILE = "seen.json", "deals.csv"
+ALERT_TTL = float(os.getenv("ALERT_TTL_HOURS", "24")) * 3600  # 同一商品推送后，多久内不再重复推送
+CHECK_TTL = 6 * 3600                                         # 检查过但没达标的商品，多久后再复查
 # =======================================
 
 
@@ -310,7 +312,31 @@ ADAPTERS = {"amazon": (amazon_search, amazon_detail),
 
 # ---------------- 主流程 ----------------
 def load_seen():
-    return set(json.load(open(SEEN_FILE))) if os.path.exists(SEEN_FILE) else set()
+    """seen: {商品id: {"t": 时间戳, "a": 是否已推送}}"""
+    if not os.path.exists(SEEN_FILE):
+        return {}
+    data = json.load(open(SEEN_FILE))
+    if isinstance(data, list):  # 兼容旧格式
+        return {i: {"t": time.time(), "a": False} for i in data}
+    return data
+
+
+def is_seen(seen, item_id):
+    e = seen.get(item_id)
+    if not e:
+        return False
+    return time.time() - e["t"] < (ALERT_TTL if e["a"] else CHECK_TTL)
+
+
+def mark(seen, item_id, alerted):
+    seen[item_id] = {"t": time.time(), "a": alerted}
+
+
+def save_seen(seen):
+    cutoff = time.time() - max(ALERT_TTL, CHECK_TTL) * 2
+    for k in [k for k, e in seen.items() if e["t"] < cutoff]:
+        del seen[k]
+    json.dump(seen, open(SEEN_FILE, "w"))
 
 
 def save_deal(row):
@@ -337,7 +363,7 @@ def scan(page, platform, kw, seen, cfg):
         return
     cands = []
     for i in items:
-        if i["id"] in seen or is_accessory(i["name"], kw):
+        if is_seen(seen, i["id"]) or is_accessory(i["name"], kw):
             continue
         if platform == "amazon" and not relevant(i["name"], kw):
             continue
@@ -349,7 +375,7 @@ def scan(page, platform, kw, seen, cfg):
     for it in cands[:MAX_DETAIL_CHECKS]:
         it["kw"] = kw
         price, note = detail(page, it)
-        seen.add(it["id"])
+        mark(seen, it["id"], False)
         if price is None:
             print("  跳过:", it["name"][:40], "-", note)
             continue
@@ -358,6 +384,7 @@ def scan(page, platform, kw, seen, cfg):
             notify(f"{cfg['icon']} {cfg['title']} | {it['platform']}\n{it['name'][:80]}\n"
                    f"价格 {price:.2f} (市场中位 {market:.2f}，便宜 {disc:.0%})\n"
                    f"{note}\n{it['url']}")
+            mark(seen, it["id"], True)
             save_deal([time.strftime("%F %T"), it["platform"], it["name"], round(price, 2),
                        round(market, 2), f"{disc:.0%}", note, it["url"]])
         time.sleep(2)
@@ -374,7 +401,7 @@ def run_round(page, seen):
                     scan(page, platform, kw, seen, cfg)
                 except Exception as e:
                     print("出错:", platform, kw, e)
-                json.dump(list(seen), open(SEEN_FILE, "w"))
+                save_seen(seen)
                 time.sleep(4)
 
 
