@@ -47,10 +47,17 @@ HEADLESS = True if CI else False
 PROFILE_DIR = "./browser_profile" # 本地保存登录状态
 TELEGRAM_TOKEN = os.getenv("TG_TOKEN", "")
 TELEGRAM_CHAT = os.getenv("TG_CHAT", "")
+# 强配件词: 标题出现就当配件(关键词本身含该词则豁免)
 ACCESSORY_WORDS = ["lid", "cover", "cap only", "spare", "replacement", "sticker", "strap", "gasket",
                    "ring", "compatible with", "refill", "case", "protector", "tempered", "skin",
-                   "pouch", "holder", "adapter only", "for iphone", "for samsung", "for ipad", "盖", "配件", "贴纸", "替换", "单拍", "补差",
-                   "邮费", "运费", "postage", "shipping fee"]
+                   "pouch", "holder", "adapter only", "accessories", "accessory", "mount", "mounting",
+                   "bracket", "tripod", "selfie", "housing", "filter", "lens cap", "memory card", "sd card",
+                   "microsd", "backpack", "sleeve", "carrying", "grip", "handle", "clamp", "suction",
+                   "ear tips", "earpads", "ear pads", "silicone", "keycap", "decal", "wrap",
+                   "盖", "配件", "贴纸", "替换", "单拍", "补差", "邮费", "运费", "postage", "shipping fee"]
+# 弱配件词: 很多主商品也会带(如"充电宝自带线")，只在标题前6个词里出现才算配件
+WEAK_ACCESSORY_WORDS = ["cable", "charger", "adapter", "battery", "batteries", "stand", "band", "clip",
+                        "pad", "pads", "tips", "remote", "dock", "bag", "controller", "charging"]
 SEEN_FILE, CSV_FILE, HISTORY_FILE = "seen.json", "deals.csv", "history.json"
 ALERT_TTL = float(os.getenv("ALERT_TTL_HOURS", "24")) * 3600  # 同一商品推送后，多久内不再重复推送
 CHECK_TTL = 6 * 3600                                         # 检查过但没达标的商品，多久后再复查
@@ -91,8 +98,17 @@ def to_price(text):
 
 
 def is_accessory(name, kw=""):
-    """标题含配件词则视为配件；关键词里本来就有的词不算(搜 'phone case' 时 case 不是配件)"""
+    """判断标题是不是配件/周边，不是关键词指的主商品。关键词里本来就有的词不算(搜 'phone case' 时 case 不是配件)"""
     n, k = (name or "").lower(), (kw or "").lower()
+    n = n.replace("charging case", " ")  # AirPods 自带的充电盒是主商品的一部分，不算配件
+    ktoks = re.findall(r"[a-z0-9]+", k)
+    # 规则1: "for / compatible with ... <品牌词>" 说明是给该品牌配套的东西
+    if ktoks:
+        brand = re.escape(ktoks[0])
+        if re.search(r"\b(for|fits?|compatible with|suitable for|replacement for|designed for)\s+"
+                     r"(?:the\s+|new\s+|all\s+)?(?:\w+\s+){0,2}?" + brand + r"\b", n):
+            return True
+    # 规则2: 强配件词
     for w in ACCESSORY_WORDS:
         if w in k:
             continue
@@ -100,6 +116,11 @@ def is_accessory(name, kw=""):
             if re.search(r"\b" + re.escape(w) + r"\b", n):
                 return True
         elif w in n:
+            return True
+    # 规则3: 弱配件词只看标题前6个词
+    head = " ".join(re.findall(r"[a-z0-9]+", n)[:6])
+    for w in WEAK_ACCESSORY_WORDS:
+        if w not in k and re.search(r"\b" + re.escape(w) + r"\b", head):
             return True
     return False
 
@@ -401,7 +422,9 @@ def scan(page, platform, kw, seen, cfg):
     if platform == "amazon":  # Amazon 搜索页价格可靠，全部记录；Shopee/Lazada 只记录进详情页核实过的价格
         for i in items:
             record_price(i["id"], i["list_price"])
-    core = [i for i in items if not i.get("extra")]
+    # 市场中位价只用主商品算: 去掉配件(以及 Amazon 上标题不含关键词的无关商品)
+    core = [i for i in items if not i.get("extra") and not is_accessory(i["name"], kw)
+            and (platform != "amazon" or relevant(i["name"], kw))]
     if len(core) < 5:
         print(f"[{platform}] '{kw}' 结果太少({len(core)})，跳过(可能被拦截)")
         return
