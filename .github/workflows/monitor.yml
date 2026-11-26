@@ -28,7 +28,9 @@ jobs:
       - name: Restore seen list
         uses: actions/cache@v4
         with:
-          path: seen.json
+          path: |
+            seen.json
+            history.json
           key: seen-${{ github.run_id }}
           restore-keys: seen-
 

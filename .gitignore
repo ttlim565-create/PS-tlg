@@ -3,3 +3,4 @@ __pycache__/
 browser_profile/
 seen.json
 deals.csv
+history.json

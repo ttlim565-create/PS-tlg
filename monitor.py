@@ -51,7 +51,7 @@ ACCESSORY_WORDS = ["lid", "cover", "cap only", "spare", "replacement", "sticker"
                    "ring", "compatible with", "refill", "case", "protector", "tempered", "skin",
                    "pouch", "holder", "adapter only", "for iphone", "for samsung", "for ipad", "盖", "配件", "贴纸", "替换", "单拍", "补差",
                    "邮费", "运费", "postage", "shipping fee"]
-SEEN_FILE, CSV_FILE = "seen.json", "deals.csv"
+SEEN_FILE, CSV_FILE, HISTORY_FILE = "seen.json", "deals.csv", "history.json"
 ALERT_TTL = float(os.getenv("ALERT_TTL_HOURS", "24")) * 3600  # 同一商品推送后，多久内不再重复推送
 CHECK_TTL = 6 * 3600                                         # 检查过但没达标的商品，多久后再复查
 # =======================================
@@ -339,6 +339,50 @@ def save_seen(seen):
     json.dump(seen, open(SEEN_FILE, "w"))
 
 
+HISTORY = {}  # {商品id: {"min": 最低价, "min_t": 时间, "first": 首次记录时间, "last": 最近记录时间, "n": 记录次数}}
+
+
+def load_history():
+    if os.path.exists(HISTORY_FILE):
+        try:
+            return json.load(open(HISTORY_FILE))
+        except Exception:
+            return {}
+    return {}
+
+
+def record_price(item_id, price):
+    if price is None or price < 0:
+        return
+    now = time.time()
+    e = HISTORY.get(item_id)
+    if not e:
+        HISTORY[item_id] = {"min": price, "min_t": now, "first": now, "last": now, "n": 1}
+        return
+    e["n"] += 1
+    e["last"] = now
+    if price < e["min"]:
+        e["min"], e["min_t"] = price, now
+
+
+def save_history():
+    cutoff = time.time() - 60 * 86400  # 60天没出现过的商品清掉
+    for k in [k for k, e in HISTORY.items() if e["last"] < cutoff]:
+        del HISTORY[k]
+    json.dump(HISTORY, open(HISTORY_FILE, "w"))
+
+
+def history_line(info, price):
+    """info 是本轮扫描前的历史快照"""
+    if not info:
+        return "历史最低: 首次记录，暂无历史"
+    days = int((time.time() - info["first"]) / 86400)
+    txt = f"历史最低(自记录{days}天/{info['n']}次): {info['min']:.2f}"
+    if price < info["min"]:
+        txt += " ← 🆕这次是新低"
+    return txt
+
+
 def save_deal(row):
     if CI:
         return
@@ -353,6 +397,10 @@ def save_deal(row):
 def scan(page, platform, kw, seen, cfg):
     search, detail = ADAPTERS[platform]
     items = [i for i in search(page, kw) if i["list_price"] is not None]
+    prior = {i["id"]: dict(HISTORY[i["id"]]) for i in items if i["id"] in HISTORY}  # 本轮前的历史快照
+    if platform == "amazon":  # Amazon 搜索页价格可靠，全部记录；Shopee/Lazada 只记录进详情页核实过的价格
+        for i in items:
+            record_price(i["id"], i["list_price"])
     core = [i for i in items if not i.get("extra")]
     if len(core) < 5:
         print(f"[{platform}] '{kw}' 结果太少({len(core)})，跳过(可能被拦截)")
@@ -379,10 +427,14 @@ def scan(page, platform, kw, seen, cfg):
         if price is None:
             print("  跳过:", it["name"][:40], "-", note)
             continue
+        if it["id"] not in prior and it["id"] in HISTORY and platform != "amazon":
+            prior[it["id"]] = dict(HISTORY[it["id"]])
+        record_price(it["id"], price)
         disc = 1 - price / market
         if price <= cfg["abs_low"] or disc >= cfg["min_discount"]:
             notify(f"{cfg['icon']} {cfg['title']} | {it['platform']}\n{it['name'][:80]}\n"
                    f"价格 {price:.2f} (市场中位 {market:.2f}，便宜 {disc:.0%})\n"
+                   f"{history_line(prior.get(it['id']), price)}\n"
                    f"{note}\n{it['url']}")
             mark(seen, it["id"], True)
             save_deal([time.strftime("%F %T"), it["platform"], it["name"], round(price, 2),
@@ -402,11 +454,13 @@ def run_round(page, seen):
                 except Exception as e:
                     print("出错:", platform, kw, e)
                 save_seen(seen)
+                save_history()
                 time.sleep(4)
 
 
 def main():
     seen = load_seen()
+    HISTORY.update(load_history())
     locale = "en-SG" if PLATFORMS == ["amazon"] else "en-MY"
     with sync_playwright() as p:
         if CI:
