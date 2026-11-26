@@ -5,10 +5,14 @@ on:
     - cron: "*/30 * * * *"   # 每30分钟一次
   workflow_dispatch:          # 允许手动点一下运行(测试用)
 
+concurrency:
+  group: price-monitor
+  cancel-in-progress: false   # 上一轮没跑完就不重叠开新的
+
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -32,7 +36,7 @@ jobs:
         run: python monitor.py
         env:
           CI_MODE: "1"
-          PLATFORMS: "amazon"
+          PLATFORMS: "amazon,lazada,shopee"
           KEYWORDS: "airpods pro,sony headphones,nintendo switch,dyson vacuum,laptop,iphone,samsung galaxy,ps5,gopro,air fryer"
           MIN_MARKET_PRICE: "100"   # 品类中位价低于这个就不看(只盯贵价货)
           MIN_DISCOUNT: "0.70"      # 比市场中位价便宜 70% 以上才提醒
