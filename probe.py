@@ -6,28 +6,17 @@ from playwright.sync_api import sync_playwright
 OUT = "probe_out"
 os.makedirs(OUT, exist_ok=True)
 SITES = {
-    "senheng": ("iphone 16", ["https://www.senheng.com.my/catalogsearch/result/?q={q}",
-                              "https://www.senheng.com.my/search?q={q}"]),
-    "harveynorman": ("iphone 16", ["https://www.harveynorman.com.my/catalogsearch/result/?q={q}",
-                                   "https://www.harveynorman.com.my/search?q={q}",
-                                   "https://www.harveynorman.com.my/search/?q={q}"]),
-    "qoo10": ("iphone 16", ["https://www.qoo10.my/gmkt.inc/Search/?keyword={q}",
-                            "https://www.qoo10.my/s/{q}",
-                            "https://www.qoo10.sg/gmkt.inc/Search/?keyword={q}"]),
-    "mudah": ("iphone 16", ["https://www.mudah.my/malaysia/all-ads?q={q}",
-                            "https://www.mudah.my/malaysia?q={q}"]),
-    "switch": ("iphone 16", ["https://www.switch.com.my/search?q={q}",
-                             "https://www.switch.com.my/catalogsearch/result/?q={q}"]),
-    "machines": ("iphone 16", ["https://www.machines.com.my/search?q={q}",
-                               "https://www.machines.com.my/catalogsearch/result/?q={q}"]),
-    "urbanrepublic": ("iphone 16", ["https://www.urbanrepublic.com.my/search?q={q}",
-                                    "https://www.urbanrepublic.com.my/catalogsearch/result/?q={q}"]),
-    "superbuy": ("iphone 16", ["https://www.superbuy.com.my/search?q={q}",
-                               "https://www.superbuy.com/en/page/search?keyword={q}"]),
-    "zalora": ("coach bag", ["https://www.zalora.com.my/catalog/?q={q}",
-                             "https://www.zalora.com.my/search?q={q}"]),
-    "ebay": ("iphone 16", ["https://www.ebay.com/sch/i.html?_nkw={q}&LH_BIN=1",
-                           "https://www.ebay.com.my/sch/i.html?_nkw={q}"]),
+    # 上一轮探测已确认能读: switch / machines / urbanrepublic / mudah / zalora；这里保存 HTML 用来写解析规则
+    "switch": ("iphone 16", ["https://shop.switch.com.my/search?q={q}"]),
+    "machines": ("iphone 16", ["https://www.machines.com.my/search?q={q}"]),
+    "urbanrepublic": ("iphone 16", ["https://shop.urbanrepublic.com.my/search?q={q}"]),
+    "mudah": ("iphone 16", ["https://www.mudah.my/malaysia/all?q={q}"]),
+    "zalora": ("gucci", ["https://www.zalora.com.my/c?q={q}"]),
+    # Senheng 上次落到了首页，再试几个搜索地址
+    "senheng": ("iphone 16", ["https://www.senheng.com.my/shop/?q={q}",
+                              "https://www.senheng.com.my/shop/search?q={q}",
+                              "https://www.senheng.com.my/shop/catalogsearch/result/?q={q}",
+                              "https://www.senheng.com.my/search?keyword={q}"]),
 }
 BLOCK = ["captcha", "access denied", "verify you are human", "unusual traffic", "cf-challenge",
          "just a moment", "pardon our interruption", "forbidden", "robot"]
