@@ -16,7 +16,7 @@ from playwright.sync_api import sync_playwright
 
 # ================= 配置 =================
 CI = os.getenv("CI_MODE") == "1"
-PLATFORMS = [p.strip() for p in os.getenv("PLATFORMS", "amazon,shopee,lazada").split(",") if p.strip()]
+PLATFORMS = [p.strip() for p in os.getenv("PLATFORMS", "amazon,lazada,switch,machines,urbanrepublic,senheng,mudah,zalora").split(",") if p.strip()]
 AMAZON_DOMAIN = "amazon.sg"       # 价格 S$
 SHOPEE_DOMAIN = "shopee.com.my"   # 价格 RM
 LAZADA_DOMAIN = "lazada.com.my"   # 价格 RM
@@ -40,14 +40,29 @@ KEYWORDS_HIGH = _kw("KEYWORDS_HIGH",
 KEYWORDS_LOW = _kw("KEYWORDS_LOW",
     "anker power bank,anker charger,baseus charger,ugreen charger,xiaomi redmi buds,xiaomi smart band,"
     "jbl go,jbl flip,logitech mouse,logitech keyboard,sandisk ssd,kingston ssd,tp-link router,philips shaver,tefal air fryer")
-TIERS = [("高单价", KEYWORDS_HIGH, _f("HIGH_MIN_MARKET", "100")),
-         ("低价位品牌", KEYWORDS_LOW, _f("LOW_MIN_MARKET", "20"))]
+KEYWORDS_FASHION = _kw("KEYWORDS_FASHION",
+    "gucci,prada,louis vuitton,burberry,versace,coach,michael kors,kate spade,tory burch,"
+    "ralph lauren,calvin klein,tommy hilfiger,longchamp,furla,nike,adidas,new balance")
+TIERS = [{"name": "高单价", "keywords": KEYWORDS_HIGH, "min_market": _f("HIGH_MIN_MARKET", "100"), "kind": "std"},
+         {"name": "低价位品牌", "keywords": KEYWORDS_LOW, "min_market": _f("LOW_MIN_MARKET", "20"), "kind": "std"},
+         {"name": "品牌服饰", "keywords": KEYWORDS_FASHION, "min_market": _f("FASHION_MIN_PRICE", "100"), "kind": "fashion"}]
+# 服饰没有「同款中位价」可比(同一品牌什么价位都有)，改为对比商品自己标注的原价
+FASHION_ERROR = _f("FASHION_ERROR_DISCOUNT", "0.85")
+FASHION_OFFER = _f("FASHION_OFFER_DISCOUNT", "0.60")
+# 有些零售站只卖特定品牌，其余关键词跳过(省时间)
+PLATFORM_KW = {
+    "switch": r"iphone|ipad|macbook|apple|airpods",
+    "machines": r"iphone|ipad|macbook|apple|airpods",
+    "urbanrepublic": r"iphone|ipad|macbook|apple|airpods|samsung galaxy|xiaomi|pixel|dji|gopro|sony wh|bose|jbl|anker|baseus|ugreen|redmi|logitech",
+}
 MAX_RUN_MIN = _f("MAX_RUN_MIN", "25")
 BRANDS = _kw("BRANDS", "apple,iphone,ipad,macbook,airpods,samsung,sony,playstation,nintendo,xbox,microsoft,"
              "dyson,bose,jbl,anker,gopro,dji,canon,nikon,fujifilm,logitech,razer,asus,lenovo,hp,dell,acer,msi,"
              "lg,philips,xiaomi,redmi,poco,huawei,honor,oppo,vivo,realme,google,pixel,garmin,fitbit,steam,valve,panasonic,"
              "sennheiser,beats,marshall,meta,quest,roborock,dreame,ecovacs,daikin,tefal,ninja,delonghi,baseus,ugreen,"
-             "sandisk,kingston,tp-link,tplink,hyperx,rog,legion,nespresso,tcl,hisense")
+             "sandisk,kingston,tp-link,tplink,hyperx,rog,legion,nespresso,tcl,hisense,"
+             "gucci,prada,louis vuitton,burberry,versace,coach,michael kors,kate spade,tory burch,ralph lauren,"
+             "calvin klein,tommy hilfiger,longchamp,furla,nike,adidas,new balance")
 MIN_MATCH = int(_f("MIN_MATCH", "5"))   # 同款(含关键词+品牌)的商品至少要有这么多个，才算得出可靠的中位价
 REF_RATIO = _f("REF_RATIO", "0.5")      # 商品自己的原价必须 >= 市场中位价的这个比例，否则是另一类商品/配件
 # 两档(严的在前): 价格错误 / 普通优惠；同一个商品只按最严的一档推送
@@ -410,9 +425,161 @@ def lazada_detail(page, item):
         return None, f"详情失败: {e}"
 
 
+# ================= 马来西亚零售站 / 二手 / 服饰 =================
+RETAIL = {
+    "switch": {"label": "Switch MY", "url": "https://shop.switch.com.my/search?q={q}", "base": "https://shop.switch.com.my",
+               "link": "a[href*='/products/']", "shopify": True},
+    "machines": {"label": "Machines MY", "url": "https://www.machines.com.my/search?q={q}", "base": "https://www.machines.com.my",
+                 "link": "a[href*='/products/']", "shopify": True},
+    "urbanrepublic": {"label": "Urban Republic MY", "url": "https://shop.urbanrepublic.com.my/search?q={q}",
+                      "base": "https://shop.urbanrepublic.com.my", "link": "a[href*='/products/']", "shopify": True},
+    "senheng": {"label": "Senheng MY", "url": "https://www.senheng.com.my/?s={q}&post_type=product",
+                "base": "https://www.senheng.com.my", "link": "a.product-image-link"},
+    "mudah": {"label": "Mudah MY(二手)", "url": "https://www.mudah.my/malaysia/all?q={q}", "base": "https://www.mudah.my",
+              "link": "a[href*='.htm']", "used": True},
+    "zalora": {"label": "Zalora MY", "url": "https://www.zalora.com.my/c?q={q}", "base": "https://www.zalora.com.my",
+               "link": "a[data-test-id='productLink']", "fashion": True},
+}
+
+CARD_JS = """(sel) => {
+  const out = []; const seen = new Set();
+  for (const a of document.querySelectorAll(sel)) {
+    const href = a.getAttribute('href') || '';
+    if (!href || href === '#') continue;
+    let el = a;
+    for (let i = 0; i < 6 && el.parentElement; i++) {
+      const p = el.parentElement;
+      const hs = new Set([...p.querySelectorAll(sel)].map(x => (x.getAttribute('href') || '').split('?')[0]));
+      if (hs.size > 1) break; el = p;
+    }
+    const key = href.split('?')[0]; if (seen.has(key)) continue; seen.add(key);
+    const img = el.querySelector('img');
+    out.push({href: href, text: (el.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 500),
+              alt: img ? (img.getAttribute('alt') || '') : '', title: a.getAttribute('title') || a.getAttribute('aria-label') || ''});
+  }
+  return out;
+}"""
+
+_NOISE_PRICE = [r"(?:up\s+to\s+|save\s+)?RM\s?[\d,.]+\s*off",                       # 'Up to RM850 off'
+                r"(?:or\s+)?RM\s?[\d,.]+\s*(?:/\s*mo\.?|per\s+month|a\s+month|x\s*\d+|for\s+\d+\s*(?:mo\w*|months?))",  # 分期
+                r"(?:free\s+gift|worth|bonus|cashback|rebate|voucher)[^R]{0,20}RM\s?[\d,.]+"]
+_NOISE_NAME = [r"\b(?:Sale|Regular)\s+price\b",
+               r"\b(?:SALE|AD|NEW|HOT|FEATURED|Sold\s+Out|Find\s+Similar|Shop\s+models|Quick\s+view|Add\s+to\s+cart)\b",
+               r"\b\d\.\d\b", r"\d+\s*%\s*off", r"No\s+min\.?\s+spend\.?", r"\bFrom\b", r"\bFree\s+gift\b",
+               r"\*?T&C[^.]*\.?", r"Min\.\s+spend\s+required\.?", r"Free\s+shipping"]
+_AMT = r"RM\s?(\d[\d,]*(?:\.\d{1,2})?)"
+
+
+def _num(x):
+    try:
+        return float(x.replace(",", ""))
+    except Exception:
+        return None
+
+
+def parse_card(text):
+    """从卡片文字里取 (现价, 原价)。先去掉分期/省多少/赠品这类干扰金额。
+    区间价(RM a – RM b)取最贵；Sale/Regular 写明的按字面；其余取前两个金额，较低的是现价、较高的是原价。"""
+    t = " " + (text or "") + " "
+    for p in _NOISE_PRICE:
+        t = re.sub(p, " ", t, flags=re.I)
+    m = re.search(_AMT + r"\s*[–—-]\s*" + _AMT, t, re.I)
+    if m:
+        return max(_num(m.group(1)), _num(m.group(2))), None
+    low = t.lower()
+    if "sale price" in low and "regular price" in low:
+        sp = re.search(r"sale\s+price[^R]*" + _AMT, t, re.I)
+        rp = re.search(r"regular\s+price[^R]*" + _AMT, t, re.I)
+        if sp:
+            return _num(sp.group(1)), (_num(rp.group(1)) if rp else None)
+    amts = [_num(x) for x in re.findall(_AMT, t, re.I)]
+    amts = [a for a in amts if a]
+    if not amts:
+        return None, None
+    if len(amts) >= 2 and amts[0] != amts[1] and max(amts[:2]) <= 10 * min(amts[:2]):
+        return min(amts[:2]), max(amts[:2])
+    return amts[0], None
+
+
+def card_name(text, alt="", title=""):
+    t = " " + (text or "") + " "
+    for p in _NOISE_PRICE:
+        t = re.sub(p, " ", t, flags=re.I)
+    ms = list(re.finditer(_AMT, t, re.I))
+    pre = t[:ms[0].start()] if ms else t
+    tail = t[ms[-1].end():] if ms else ""
+    def clean(x):
+        for p in _NOISE_NAME:
+            x = re.sub(p, " ", x, flags=re.I)
+        return re.sub(r"[\s\-–—|]+", " ", x).strip(" -–—|")
+    pre, tail = clean(pre), clean(tail)
+    for cand in (pre, tail, (title or "").strip(), re.sub(r"^feature ad\s+", "", alt or "", flags=re.I).strip()):
+        if len(cand) >= 4:
+            return cand[:140]
+    return ""
+
+
+def retail_search(page, site, kw):
+    cfg = RETAIL[site]
+    url = cfg["url"].format(q=urllib.parse.quote_plus(kw))
+    items = []
+    try:
+        page.goto(url, wait_until="domcontentloaded", timeout=45000)
+        page.wait_for_timeout(4500)
+        for _ in range(3):
+            page.mouse.wheel(0, 2500)
+            page.wait_for_timeout(900)
+        cards = page.evaluate(CARD_JS, cfg["link"])
+    except Exception as e:
+        print(f"[{site}] 搜索页打开失败:", str(e)[:100])
+        return items
+    for c in cards:
+        price, was = parse_card(c["text"])
+        name = card_name(c["text"], c.get("alt", ""), c.get("title", ""))
+        if not price or not name:
+            continue
+        href = c["href"]
+        full = href if href.startswith("http") else cfg["base"] + (href if href.startswith("/") else "/" + href)
+        clean_url = full.split("?")[0].split("#")[0] if (cfg.get("shopify") or "senheng" in site) else full
+        items.append({"id": f"{site}:{clean_url}", "name": name, "list_price": price, "was": was,
+                      "url": clean_url, "platform": cfg["label"], "site": site})
+    if items:
+        s0 = items[0]
+        print(f"[{site}] '{kw}' 解析到 {len(items)} 个商品，例: {s0['name'][:40]} | {s0['list_price']} | 原价 {s0['was']}")
+    else:
+        print(f"[{site}] '{kw}' 没解析到商品(页面结构可能变了或被拦)")
+    return items
+
+
+def retail_detail(page, item):
+    """Shopify 站点读 /products/xxx.js 拿所有规格的价格(分)，按最贵在售规格判断；其余站点用搜索卡片价"""
+    cfg = RETAIL[item["site"]]
+    if not cfg.get("shopify"):
+        return item["list_price"], ""
+    try:
+        data = page.evaluate("async (u) => { const r = await fetch(u); if (!r.ok) return null; return await r.json(); }",
+                             item["url"] + ".js")
+    except Exception as e:
+        data = None
+    if not data or not data.get("variants"):
+        return item["list_price"], "未能读取规格，按搜索页价格"
+    models = [{"name": v.get("title") or "", "price": (v.get("price") or 0) / 100.0,
+               "stock": 1 if v.get("available", True) else 0} for v in data["variants"]]
+    comp = [(v.get("compare_at_price") or 0) / 100.0 for v in data["variants"] if v.get("compare_at_price")]
+    if comp and not item.get("was"):
+        item["was"] = max(comp)
+    return models_real_price(models)
+
+
+def _retail_pair(site):
+    return (lambda page, kw, _s=site: retail_search(page, _s, kw)), retail_detail
+
+
 ADAPTERS = {"amazon": (amazon_search, amazon_detail),
             "shopee": (shopee_search, shopee_detail),
             "lazada": (lazada_search, lazada_detail)}
+for _site in RETAIL:
+    ADAPTERS[_site] = _retail_pair(_site)
 
 
 # ---------------- 主流程 ----------------
@@ -522,6 +689,7 @@ def classify(price, market):
 
 
 def scan(page, platform, kw, seen, min_market):
+    used = RETAIL.get(platform, {}).get('used', False)
     search, detail = ADAPTERS[platform]
     items = [i for i in search(page, kw) if i["list_price"] is not None]
     prior = {i["id"]: dict(HISTORY[i["id"]]) for i in items if i["id"] in HISTORY}  # 本轮前的历史快照
@@ -559,6 +727,11 @@ def scan(page, platform, kw, seen, min_market):
         if price is None:
             print("  跳过:", it["name"][:40], "-", note)
             continue
+        if used and price <= max(10, 0.03 * market):
+            print("  跳过(二手占位价):", it["name"][:40], price)
+            continue
+        if used:
+            note = (note + "; " if note else "") + "二手/个人卖家，低价可能是占位价或骗局，务必当面验货再付款"
         if it["id"] not in prior and it["id"] in HISTORY and platform != "amazon":
             prior[it["id"]] = dict(HISTORY[it["id"]])
         record_price(it["id"], price)
@@ -580,13 +753,50 @@ def scan(page, platform, kw, seen, min_market):
         time.sleep(2)
 
 
+def scan_fashion(page, platform, kw, seen, min_price):
+    """品牌服饰: 没有同款可比，只看商品自己标的原价与现价的差距；要求原价 >= min_price(只看贵价款)"""
+    search, detail = ADAPTERS[platform]
+    items = [i for i in search(page, kw) if i["list_price"]]
+    same = [i for i in items if relevant(i["name"], kw) and brand_ok(i["name"])]
+    cands = [i for i in same if i.get("was") and i["was"] >= min_price and not is_seen(seen, i["id"])
+             and 1 - i["list_price"] / i["was"] >= FASHION_OFFER]
+    cands.sort(key=lambda i: i["list_price"] / i["was"])
+    print(f"[{platform}] '{kw}' 品牌款{len(same)}个，折扣达标候选 {len(cands)} 个")
+    for it in cands[:MAX_DETAIL_CHECKS]:
+        mark(seen, it["id"], False)
+        disc = 1 - it["list_price"] / it["was"]
+        record_price(it["id"], it["list_price"])
+        if disc >= FASHION_ERROR:
+            head, icon = "PRICE ERROR", "🚨"
+        else:
+            head, icon = "OFFER", "🔥"
+        notify(f"{icon} {head} | {it['platform']} | 品牌服饰\n{it['name'][:80]}\n"
+               f"现价 {it['list_price']:.2f} / 标注原价 {it['was']:.2f}，折扣 {disc:.0%}\n"
+               f"对比的是商家标注的原价，不是同款市场价，原价可能虚高，请自行核对\n{it['url']}")
+        mark(seen, it["id"], True)
+        save_deal([time.strftime("%F %T"), it["platform"], it["name"], round(it["list_price"], 2),
+                   round(it["was"], 2), f"{disc:.0%}", "品牌服饰(对比原价)", it["url"]])
+
+
+def allowed(platform, kw, tier):
+    """这个平台要不要扫这个关键词"""
+    if tier["kind"] == "fashion":
+        return RETAIL.get(platform, {}).get("fashion", False)
+    if RETAIL.get(platform, {}).get("fashion"):
+        return False
+    if RETAIL.get(platform, {}).get("used") and tier["name"] != "高单价":
+        return False  # 二手站只看高单价
+    pat = PLATFORM_KW.get(platform)
+    return not pat or re.search(pat, kw)
+
+
 def run_round(page, seen):
     import random
     t0 = time.time()
-    jobs = [(kw, mm, tier) for tier, kws, mm in TIERS for kw in kws]
+    jobs = [(kw, t) for t in TIERS for kw in t["keywords"]]
     random.shuffle(jobs)  # 每次随机顺序，时间不够时不同关键词轮流被覆盖
     done = 0
-    for kw, mm, tier in jobs:
+    for kw, tier in jobs:
         if CI and time.time() - t0 > MAX_RUN_MIN * 60:
             print(f"已达单次运行上限 {MAX_RUN_MIN:.0f} 分钟，本次完成 {done}/{len(jobs)} 个关键词，其余下次再扫")
             break
@@ -594,8 +804,13 @@ def run_round(page, seen):
             if platform not in ADAPTERS:
                 print("未知平台:", platform)
                 continue
+            if not allowed(platform, kw, tier):
+                continue
             try:
-                scan(page, platform, kw, seen, mm)
+                if tier["kind"] == "fashion":
+                    scan_fashion(page, platform, kw, seen, tier["min_market"])
+                else:
+                    scan(page, platform, kw, seen, tier["min_market"])
             except Exception as e:
                 print("出错:", platform, kw, e)
             save_seen(seen)
