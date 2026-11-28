@@ -6,18 +6,16 @@ from playwright.sync_api import sync_playwright
 OUT = "probe_out"
 os.makedirs(OUT, exist_ok=True)
 SITES = {
-    # 上一轮探测已确认能读: switch / machines / urbanrepublic / mudah / zalora；这里保存 HTML 用来写解析规则
     "switch": ("iphone 16", ["https://shop.switch.com.my/search?q={q}"]),
     "machines": ("iphone 16", ["https://www.machines.com.my/search?q={q}"]),
     "urbanrepublic": ("iphone 16", ["https://shop.urbanrepublic.com.my/search?q={q}"]),
     "mudah": ("iphone 16", ["https://www.mudah.my/malaysia/all?q={q}"]),
-    "zalora": ("gucci", ["https://www.zalora.com.my/c?q={q}"]),
-    # Senheng 上次落到了首页，再试几个搜索地址
-    "senheng": ("iphone 16", ["https://www.senheng.com.my/shop/?q={q}",
-                              "https://www.senheng.com.my/shop/search?q={q}",
-                              "https://www.senheng.com.my/shop/catalogsearch/result/?q={q}",
-                              "https://www.senheng.com.my/search?keyword={q}"]),
+    "zalora": ("coach", ["https://www.zalora.com.my/c?q={q}"]),
+    "senheng": ("iphone 16", ["https://www.senheng.com.my/?s={q}&post_type=product",
+                              "https://www.senheng.com.my/shop/?s={q}&post_type=product"]),
 }
+LINKSEL = {"switch": "a[href*='/products/']", "machines": "a[href*='/products/']", "urbanrepublic": "a[href*='/products/']",
+           "mudah": "a[href$='.htm']", "zalora": "a[href*='/p/']", "senheng": "li.product a, .product a[href*='/shop/'], a[href*='/product/']"}
 BLOCK = ["captcha", "access denied", "verify you are human", "unusual traffic", "cf-challenge",
          "just a moment", "pardon our interruption", "forbidden", "robot"]
 PRICE = re.compile(r"(RM|MYR|S\$|US\s?\$|\$)\s?\d[\d,]*(\.\d{1,2})?")
@@ -63,7 +61,21 @@ with sync_playwright() as pw:
                         j = json.loads(m.group(1)); ld.append(j.get("@type") if isinstance(j, dict) else "list")
                     except Exception:
                         ld.append("bad")
-                info.update(status=resp.status if resp else None, final=page.url[:120], title=page.title()[:80],
+                ldp = []
+                for m2 in re.finditer(r'<script[^>]*application/ld\+json[^>]*>(.*?)</script>', html, re.S | re.I):
+                    if '"Product"' in m2.group(1) and len(ldp) < 2:
+                        ldp.append(re.sub(r"\s+", " ", m2.group(1))[:900])
+                card_html = page.evaluate("""(sel) => {
+                  const links = [...document.querySelectorAll(sel)].filter(a => /RM|\\$/.test((a.closest('li,div,article')||a).innerText||''));
+                  if (!links.length) return '';
+                  let el = links[0];
+                  for (let i = 0; i < 6 && el.parentElement; i++) {
+                    const p = el.parentElement; const hs = new Set([...p.querySelectorAll(sel)].map(x => x.getAttribute('href')));
+                    if (hs.size > 1) break; el = p;
+                  }
+                  return el.outerHTML.replace(/\\s+/g, ' ').slice(0, 1800);
+                }""", LINKSEL.get(site, "a"))
+                info.update(ldp=ldp, card_html=card_html, status=resp.status if resp else None, final=page.url[:120], title=page.title()[:80],
                             html_len=len(html), block=[b for b in BLOCK if b in low],
                             price_mentions=len(PRICE.findall(html)), jsonld=ld[:8],
                             cards=page.evaluate(JS))
