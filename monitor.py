@@ -4,9 +4,10 @@
 - GitHub Actions: 设 CI_MODE=1，只跑一轮就退出，建议只开 amazon
 
 环境变量(都可选):
-  PLATFORMS  默认 "amazon,shopee,lazada"，GitHub 上用 "amazon"
-  KEYWORDS_DEAL / KEYWORDS_ERROR  两套关键词，逗号分隔
-  DEAL_*  / ERROR_*  两套阈值 (MIN_DISCOUNT / ABS_LOW / MIN_MARKET)
+  PLATFORMS  默认 "amazon,shopee,lazada"
+  KEYWORDS   具体型号/品牌词，逗号分隔(越具体比价越准)
+  BRANDS     品牌白名单，标题必须含其中一个才会被考虑
+  DEAL_* / ERROR_*  两档阈值 (MIN_DISCOUNT / MIN_MARKET)；REF_RATIO 原价佐证比例
   TG_TOKEN / TG_CHAT  Telegram 通知
 """
 import csv, json, os, re, statistics, time, urllib.parse, urllib.request
@@ -28,20 +29,23 @@ def _f(name, default):
     return float(os.getenv(name, default))
 
 
-# 两种模式: 普通优惠(日常好价/高折扣) 和 价格错误(贵价货被错标成极低价)
+# 只盯高单价品牌货。关键词要具体(品牌+型号)，同一个关键词搜到的才是「同一类商品」，中位价才有意义
+KEYWORDS = _kw("KEYWORDS", "iphone 16,iphone 17,samsung galaxy s25,airpods pro,sony wh-1000xm5,bose quietcomfort,"
+               "nintendo switch,ps5,xbox series x,steam deck,macbook air,ipad,apple watch,"
+               "dyson v15,dyson airwrap,gopro hero,dji osmo,dji mini")
+BRANDS = _kw("BRANDS", "apple,iphone,ipad,macbook,airpods,samsung,sony,playstation,nintendo,xbox,microsoft,"
+             "dyson,bose,jbl,anker,gopro,dji,canon,nikon,fujifilm,logitech,razer,asus,lenovo,hp,dell,acer,msi,"
+             "lg,philips,xiaomi,huawei,google,pixel,garmin,fitbit,steam,valve,panasonic,sennheiser,beats,marshall")
+MIN_MATCH = int(_f("MIN_MATCH", "5"))   # 同款(含关键词+品牌)的商品至少要有这么多个，才算得出可靠的中位价
+REF_RATIO = _f("REF_RATIO", "0.5")      # 商品自己的原价必须 >= 市场中位价的这个比例，否则是另一类商品/配件
+# 两档(严的在前): 价格错误 / 普通优惠；同一个商品只按最严的一档推送
 PROFILES = [
-    {"name": "普通优惠", "title": "OFFER", "icon": "🔥",
-     "keywords": _kw("KEYWORDS_DEAL", "water bottle,kettle,earphones,power bank"),
-     "min_discount": _f("DEAL_MIN_DISCOUNT", "0.55"),
-     "abs_low": _f("DEAL_ABS_LOW", "2"),
-     "min_market": _f("DEAL_MIN_MARKET", "15"),
-     "ref_ratio": 0},
     {"name": "价格错误", "title": "PRICE ERROR", "icon": "🚨",
-     "keywords": _kw("KEYWORDS_ERROR", "airpods pro,sony headphones,nintendo switch,dyson vacuum,laptop,iphone,ps5,gopro"),
-     "min_discount": _f("ERROR_MIN_DISCOUNT", "0.70"),
-     "abs_low": _f("ERROR_ABS_LOW", "0"),
-     "min_market": _f("ERROR_MIN_MARKET", "100"),
-     "ref_ratio": _f("ERROR_REF_RATIO", "0.5")},  # 商品自己的原价必须 >= 市场中位价的这个比例，否则是另一类商品/配件
+     "min_discount": _f("ERROR_MIN_DISCOUNT", "0.70"), "abs_low": 0,
+     "min_market": _f("ERROR_MIN_MARKET", "100"), "ref_ratio": REF_RATIO},
+    {"name": "普通优惠", "title": "OFFER", "icon": "🔥",
+     "min_discount": _f("DEAL_MIN_DISCOUNT", "0.55"), "abs_low": 0,
+     "min_market": _f("DEAL_MIN_MARKET", "100"), "ref_ratio": REF_RATIO},
 ]
 MAX_DETAIL_CHECKS = 10            # 每个平台每个关键词最多进多少个商品页
 INTERVAL_MIN = 20                 # 本地循环间隔(分钟)
@@ -51,7 +55,7 @@ TELEGRAM_TOKEN = os.getenv("TG_TOKEN", "")
 TELEGRAM_CHAT = os.getenv("TG_CHAT", "")
 # 强配件词: 标题出现就当配件(关键词本身含该词则豁免)
 ACCESSORY_WORDS = ["lid", "cover", "cap only", "spare", "replacement", "sticker", "strap", "gasket",
-                   "ring", "compatible with", "refill", "case", "protector", "tempered", "skin",
+                   "ring", "compatible with", "compatible", "refill", "case", "protector", "tempered", "skin",
                    "pouch", "holder", "adapter only", "accessories", "accessory", "mount", "mounting",
                    "bracket", "tripod", "selfie", "housing", "filter", "lens cap", "memory card", "sd card",
                    "microsd", "backpack", "sleeve", "carrying", "grip", "handle", "clamp", "suction",
@@ -127,10 +131,20 @@ def is_accessory(name, kw=""):
     return False
 
 
+def _has(tok, text):
+    return re.search(r"(?<![a-z0-9])" + re.escape(tok) + r"(?![a-z0-9])", text) is not None
+
+
 def relevant(name, kw):
-    """标题必须包含关键词里的每个词，避免搜 'airpods pro' 却捞到壳/贴纸"""
+    """标题必须完整包含关键词里的每个词(按词匹配，'iphone 16' 不会匹配 'iphone 160')"""
     n = (name or "").lower()
-    return all(t in n for t in re.findall(r"[a-z0-9]+", kw.lower()))
+    return all(_has(t, n) for t in re.findall(r"[a-z0-9]+", kw.lower()))
+
+
+def brand_ok(name):
+    """标题必须含白名单里的大品牌，杂牌直接不看"""
+    n = (name or "").lower()
+    return any(_has(b, n) for b in BRANDS)
 
 
 def capture(page, url, pattern, wait_ms=5000, scroll=True):
@@ -264,8 +278,9 @@ def shopee_search(page, kw):
 
 
 def models_real_price(models):
-    """多规格商品: 返回 (真实可买的最低价, 备注)；规格混着不同商品(如相机+防水壳+电池)时直接跳过。
-    models: [{name, price, stock}]，包含售罄规格——售罄规格用来判断这个链接「主商品」的价格水平。"""
+    """多规格商品无法确定你会买哪一个规格，所以按「最贵的在售主商品规格」来判断:
+    只有连最贵的规格都明显低于同款市场价，才算优惠/错价；只有某个规格便宜的一律不推。
+    返回 (用于判断的价格, 备注)。售罄规格不算能买，但用来判断这个链接的主商品价格水平。"""
     valid = [m for m in models if m["price"] is not None and m["price"] > 0]
     if not valid:
         return None, "无规格数据"
@@ -276,15 +291,12 @@ def models_real_price(models):
     if not main:
         return None, "在售规格均疑似配件"
     ref_max = max(m["price"] for m in valid)  # 含售罄规格
-    lo = min(m["price"] for m in main)
-    summary = ""
-    if len(valid) > 1:
-        summary = " | ".join(f"{m['name'][:16]} {m['price']:.0f}" + ("(售罄)" if m["stock"] <= 0 else "")
-                             for m in valid[:6])
+    lo, hi = min(m["price"] for m in main), max(m["price"] for m in main)
     if len(valid) >= 2 and lo < ref_max / 3:
-        return None, f"规格混合(价差>3倍，疑似含配件/不同商品)，已跳过: {summary}"
-    note = ("已排除疑似配件规格; " if len(main) < len(in_stock) else "") + (f"规格: {summary}" if summary else "")
-    return lo, note.strip()
+        return None, "规格混合(价差>3倍，疑似含配件/不同商品)，已跳过"
+    if len(main) == 1:
+        return hi, ""
+    return hi, f"共{len(main)}个在售规格，价格 {lo:.0f}–{hi:.0f}，按最贵规格判断(无论选哪个都不贵于此)"
 
 
 def shopee_detail(page, item):
@@ -464,48 +476,58 @@ def save_deal(row):
 
 
 def ref_check(item, market, cfg):
-    """价格错误模式: 商品自己的原价应该接近市场水平；原价本身就远低于市场中位价 = 另一类商品/配件，不是错价"""
+    """商品自己的原价应该接近市场水平；原价本身就远低于市场中位价 = 另一类商品/配件，不是错价"""
     ratio = cfg.get("ref_ratio", 0)
     if not ratio:
         return True, ""
     was = item.get("was")
     if not was:
-        return True, "无原价佐证，请人工确认是否真为错价"
+        return True, "无原价佐证，请人工确认"
     if was < market * ratio:
-        return False, f"原价{was:.0f}远低于市场中位价{market:.0f}，属另一类商品/配件，非价格错误"
+        return False, f"原价{was:.0f}远低于市场中位价{market:.0f}，属另一类商品/配件"
     return True, ""
 
 
-def scan(page, platform, kw, seen, cfg):
+def classify(price, market):
+    """按最严的一档归类；都不满足返回 (None, 折扣)"""
+    disc = 1 - price / market
+    for cfg in PROFILES:
+        if disc >= cfg["min_discount"] or (cfg["abs_low"] and price <= cfg["abs_low"]):
+            return cfg, disc
+    return None, disc
+
+
+def scan(page, platform, kw, seen):
     search, detail = ADAPTERS[platform]
     items = [i for i in search(page, kw) if i["list_price"] is not None]
     prior = {i["id"]: dict(HISTORY[i["id"]]) for i in items if i["id"] in HISTORY}  # 本轮前的历史快照
     if platform == "amazon":  # Amazon 搜索页价格可靠，全部记录；Shopee/Lazada 只记录进详情页核实过的价格
         for i in items:
             record_price(i["id"], i["list_price"])
-    # 市场中位价只用主商品算: 去掉配件(以及 Amazon 上标题不含关键词的无关商品)
-    core = [i for i in items if not i.get("extra") and not is_accessory(i["name"], kw)
-            and (platform != "amazon" or relevant(i["name"], kw))]
-    if len(core) < 5:
-        print(f"[{platform}] '{kw}' 结果太少({len(core)})，跳过(可能被拦截)")
+    # 「同款」= 标题含完整关键词 + 大品牌 + 不是配件；中位价只用同款算(排序价格最低的额外结果不参与)
+    same = [i for i in items if relevant(i["name"], kw) and brand_ok(i["name"])
+            and not is_accessory(i["name"], kw)]
+    core = [i for i in same if not i.get("extra") and i["list_price"] > 0]
+    if len(core) < MIN_MATCH:
+        print(f"[{platform}] '{kw}' 同款品牌商品太少({len(core)}/{MIN_MATCH})，无法可靠比价，跳过")
         return
-    market = statistics.median([i["list_price"] for i in core if i["list_price"] > 0] or [0])
-    if market < cfg["min_market"]:
-        print(f"[{platform}] '{kw}' 市场中位价 {market:.2f} 太低，跳过")
+    market = statistics.median([i["list_price"] for i in core])
+    loosest = PROFILES[-1]
+    for cfg in PROFILES:
+        if cfg["min_discount"] < loosest["min_discount"]:
+            loosest = cfg
+    if market < loosest["min_market"]:
+        print(f"[{platform}] '{kw}' 同款中位价 {market:.2f} 太低，跳过")
         return
     cands = []
-    for i in items:
-        if is_seen(seen, i["id"]) or is_accessory(i["name"], kw):
-            continue
-        if not ref_check(i, market, cfg)[0]:
-            continue
-        if platform == "amazon" and not relevant(i["name"], kw):
+    for i in same:
+        if is_seen(seen, i["id"]) or not ref_check(i, market, loosest)[0]:
             continue
         shown = (1 - i["list_price"] / i["was"]) if i.get("was") else 0
-        if i["list_price"] <= cfg["abs_low"] or i["list_price"] <= market * (1 - cfg["min_discount"]) or shown >= cfg["min_discount"]:
+        if i["list_price"] <= market * (1 - loosest["min_discount"]) or shown >= loosest["min_discount"]:
             cands.append(i)
     cands.sort(key=lambda i: i["list_price"])
-    print(f"[{cfg['name']}|{platform}] '{kw}' 市场中位价 {market:.2f}，候选 {len(cands)} 个")
+    print(f"[{platform}] '{kw}' 同款{len(core)}个，中位价 {market:.2f}，候选 {len(cands)} 个")
     for it in cands[:MAX_DETAIL_CHECKS]:
         it["kw"] = kw
         price, note = detail(page, it)
@@ -516,8 +538,8 @@ def scan(page, platform, kw, seen, cfg):
         if it["id"] not in prior and it["id"] in HISTORY and platform != "amazon":
             prior[it["id"]] = dict(HISTORY[it["id"]])
         record_price(it["id"], price)
-        disc = 1 - price / market
-        if price <= cfg["abs_low"] or disc >= cfg["min_discount"]:
+        cfg, disc = classify(price, market)
+        if cfg:
             ok, ref_note = ref_check(it, market, cfg)
             if not ok:
                 print("  跳过:", it["name"][:40], "-", ref_note)
@@ -525,7 +547,7 @@ def scan(page, platform, kw, seen, cfg):
             if ref_note:
                 note = (note + "; " if note else "") + ref_note
             notify(f"{cfg['icon']} {cfg['title']} | {it['platform']}\n{it['name'][:80]}\n"
-                   f"价格 {price:.2f} (市场中位 {market:.2f}，便宜 {disc:.0%})\n"
+                   f"价格 {price:.2f} (同款中位 {market:.2f}，便宜 {disc:.0%})\n"
                    f"{history_line(prior.get(it['id']), price)}\n"
                    f"{note}\n{it['url']}")
             mark(seen, it["id"], True)
@@ -535,19 +557,18 @@ def scan(page, platform, kw, seen, cfg):
 
 
 def run_round(page, seen):
-    for cfg in PROFILES:
-        for kw in cfg["keywords"]:
-            for platform in PLATFORMS:
-                if platform not in ADAPTERS:
-                    print("未知平台:", platform)
-                    continue
-                try:
-                    scan(page, platform, kw, seen, cfg)
-                except Exception as e:
-                    print("出错:", platform, kw, e)
-                save_seen(seen)
-                save_history()
-                time.sleep(4)
+    for kw in KEYWORDS:
+        for platform in PLATFORMS:
+            if platform not in ADAPTERS:
+                print("未知平台:", platform)
+                continue
+            try:
+                scan(page, platform, kw, seen)
+            except Exception as e:
+                print("出错:", platform, kw, e)
+            save_seen(seen)
+            save_history()
+            time.sleep(4)
 
 
 def main():
