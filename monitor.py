@@ -5,7 +5,8 @@
 
 环境变量(都可选):
   PLATFORMS  默认 "amazon,shopee,lazada"
-  KEYWORDS   具体型号/品牌词，逗号分隔(越具体比价越准)
+  KEYWORDS_HIGH / KEYWORDS_LOW  高单价(手机/游戏机/电器)与低价位品牌货的关键词(具体品牌+型号)
+  MAX_RUN_MIN  CI 模式下单次最多跑多少分钟(默认25)，关键词每次随机打乱，轮流覆盖
   BRANDS     品牌白名单，标题必须含其中一个才会被考虑
   DEAL_* / ERROR_*  两档阈值 (MIN_DISCOUNT / MIN_MARKET)；REF_RATIO 原价佐证比例
   TG_TOKEN / TG_CHAT  Telegram 通知
@@ -30,22 +31,33 @@ def _f(name, default):
 
 
 # 只盯高单价品牌货。关键词要具体(品牌+型号)，同一个关键词搜到的才是「同一类商品」，中位价才有意义
-KEYWORDS = _kw("KEYWORDS", "iphone 16,iphone 17,samsung galaxy s25,airpods pro,sony wh-1000xm5,bose quietcomfort,"
-               "nintendo switch,ps5,xbox series x,steam deck,macbook air,ipad,apple watch,"
-               "dyson v15,dyson airwrap,gopro hero,dji osmo,dji mini")
+# 高单价: 手机 / 游戏机(含掌机) / 电器与数码；低价位: 品牌小件。关键词要具体(品牌+型号)，同关键词搜到的才是「同一类商品」
+KEYWORDS_HIGH = _kw("KEYWORDS_HIGH",
+    "iphone 17,iphone 16,samsung galaxy s25,samsung galaxy z,xiaomi 15,google pixel,"
+    "nintendo switch 2,nintendo switch oled,ps5 slim,playstation portal,xbox series x,steam deck,rog ally,legion go,meta quest,"
+    "samsung tv,lg oled,sony bravia,philips air fryer,dyson v15,dyson airwrap,roborock,dreame,"
+    "macbook air,ipad,apple watch,airpods pro,sony wh-1000xm5,bose quietcomfort,gopro hero,dji osmo,dji mini")
+KEYWORDS_LOW = _kw("KEYWORDS_LOW",
+    "anker power bank,anker charger,baseus charger,ugreen charger,xiaomi redmi buds,xiaomi smart band,"
+    "jbl go,jbl flip,logitech mouse,logitech keyboard,sandisk ssd,kingston ssd,tp-link router,philips shaver,tefal air fryer")
+TIERS = [("高单价", KEYWORDS_HIGH, _f("HIGH_MIN_MARKET", "100")),
+         ("低价位品牌", KEYWORDS_LOW, _f("LOW_MIN_MARKET", "20"))]
+MAX_RUN_MIN = _f("MAX_RUN_MIN", "25")
 BRANDS = _kw("BRANDS", "apple,iphone,ipad,macbook,airpods,samsung,sony,playstation,nintendo,xbox,microsoft,"
              "dyson,bose,jbl,anker,gopro,dji,canon,nikon,fujifilm,logitech,razer,asus,lenovo,hp,dell,acer,msi,"
-             "lg,philips,xiaomi,huawei,google,pixel,garmin,fitbit,steam,valve,panasonic,sennheiser,beats,marshall")
+             "lg,philips,xiaomi,redmi,poco,huawei,honor,oppo,vivo,realme,google,pixel,garmin,fitbit,steam,valve,panasonic,"
+             "sennheiser,beats,marshall,meta,quest,roborock,dreame,ecovacs,daikin,tefal,ninja,delonghi,baseus,ugreen,"
+             "sandisk,kingston,tp-link,tplink,hyperx,rog,legion,nespresso,tcl,hisense")
 MIN_MATCH = int(_f("MIN_MATCH", "5"))   # 同款(含关键词+品牌)的商品至少要有这么多个，才算得出可靠的中位价
 REF_RATIO = _f("REF_RATIO", "0.5")      # 商品自己的原价必须 >= 市场中位价的这个比例，否则是另一类商品/配件
 # 两档(严的在前): 价格错误 / 普通优惠；同一个商品只按最严的一档推送
 PROFILES = [
     {"name": "价格错误", "title": "PRICE ERROR", "icon": "🚨",
      "min_discount": _f("ERROR_MIN_DISCOUNT", "0.70"), "abs_low": 0,
-     "min_market": _f("ERROR_MIN_MARKET", "100"), "ref_ratio": REF_RATIO},
+     "ref_ratio": REF_RATIO},
     {"name": "普通优惠", "title": "OFFER", "icon": "🔥",
      "min_discount": _f("DEAL_MIN_DISCOUNT", "0.55"), "abs_low": 0,
-     "min_market": _f("DEAL_MIN_MARKET", "100"), "ref_ratio": REF_RATIO},
+     "ref_ratio": REF_RATIO},
 ]
 MAX_DETAIL_CHECKS = 10            # 每个平台每个关键词最多进多少个商品页
 INTERVAL_MIN = 20                 # 本地循环间隔(分钟)
@@ -135,9 +147,21 @@ def _has(tok, text):
     return re.search(r"(?<![a-z0-9])" + re.escape(tok) + r"(?![a-z0-9])", text) is not None
 
 
-def relevant(name, kw):
-    """标题必须完整包含关键词里的每个词(按词匹配，'iphone 16' 不会匹配 'iphone 160')"""
+ALIASES = [("playstation 5", "ps5"), ("playstation5", "ps5"), ("ps 5", "ps5"),
+           ("wh1000xm", "wh-1000xm"), ("wh 1000xm", "wh-1000xm"), ("nintendo switch2", "nintendo switch 2"),
+           ("galaxy z flip", "galaxy z flip"), ("macbook-air", "macbook air")]
+
+
+def norm_title(name):
     n = (name or "").lower()
+    for a, b in ALIASES:
+        n = n.replace(a, b)
+    return n
+
+
+def relevant(name, kw):
+    """标题必须完整包含关键词里的每个词(按词匹配，'iphone 16' 不会匹配 'iphone 160')；认常见别名(PlayStation 5=PS5)"""
+    n = norm_title(name)
     return all(_has(t, n) for t in re.findall(r"[a-z0-9]+", kw.lower()))
 
 
@@ -497,7 +521,7 @@ def classify(price, market):
     return None, disc
 
 
-def scan(page, platform, kw, seen):
+def scan(page, platform, kw, seen, min_market):
     search, detail = ADAPTERS[platform]
     items = [i for i in search(page, kw) if i["list_price"] is not None]
     prior = {i["id"]: dict(HISTORY[i["id"]]) for i in items if i["id"] in HISTORY}  # 本轮前的历史快照
@@ -516,7 +540,7 @@ def scan(page, platform, kw, seen):
     for cfg in PROFILES:
         if cfg["min_discount"] < loosest["min_discount"]:
             loosest = cfg
-    if market < loosest["min_market"]:
+    if market < min_market:
         print(f"[{platform}] '{kw}' 同款中位价 {market:.2f} 太低，跳过")
         return
     cands = []
@@ -557,18 +581,27 @@ def scan(page, platform, kw, seen):
 
 
 def run_round(page, seen):
-    for kw in KEYWORDS:
+    import random
+    t0 = time.time()
+    jobs = [(kw, mm, tier) for tier, kws, mm in TIERS for kw in kws]
+    random.shuffle(jobs)  # 每次随机顺序，时间不够时不同关键词轮流被覆盖
+    done = 0
+    for kw, mm, tier in jobs:
+        if CI and time.time() - t0 > MAX_RUN_MIN * 60:
+            print(f"已达单次运行上限 {MAX_RUN_MIN:.0f} 分钟，本次完成 {done}/{len(jobs)} 个关键词，其余下次再扫")
+            break
         for platform in PLATFORMS:
             if platform not in ADAPTERS:
                 print("未知平台:", platform)
                 continue
             try:
-                scan(page, platform, kw, seen)
+                scan(page, platform, kw, seen, mm)
             except Exception as e:
                 print("出错:", platform, kw, e)
             save_seen(seen)
             save_history()
             time.sleep(4)
+        done += 1
 
 
 def main():

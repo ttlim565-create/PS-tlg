@@ -39,11 +39,14 @@ jobs:
         env:
           CI_MODE: "1"
           PLATFORMS: "amazon,lazada"   # Shopee 在云端会被拦(0结果)，已关闭；有电脑后可加回 shopee
-          # 只盯高单价品牌货，关键词越具体越准(品牌+型号)
-          KEYWORDS: "iphone 16,iphone 17,samsung galaxy s25,airpods pro,sony wh-1000xm5,bose quietcomfort,nintendo switch,ps5,xbox series x,steam deck,macbook air,ipad,apple watch,dyson v15,dyson airwrap,gopro hero,dji osmo,dji mini"
+          # 高单价(手机/游戏机含掌机/电器数码)，关键词越具体越准
+          KEYWORDS_HIGH: "iphone 17,iphone 16,samsung galaxy s25,samsung galaxy z,xiaomi 15,google pixel,nintendo switch 2,nintendo switch oled,ps5 slim,playstation portal,xbox series x,steam deck,rog ally,legion go,meta quest,samsung tv,lg oled,sony bravia,philips air fryer,dyson v15,dyson airwrap,roborock,dreame,macbook air,ipad,apple watch,airpods pro,sony wh-1000xm5,bose quietcomfort,gopro hero,dji osmo,dji mini"
+          # 低价位品牌货
+          KEYWORDS_LOW: "anker power bank,anker charger,baseus charger,ugreen charger,xiaomi redmi buds,xiaomi smart band,jbl go,jbl flip,logitech mouse,logitech keyboard,sandisk ssd,kingston ssd,tp-link router,philips shaver,tefal air fryer"
           ERROR_MIN_DISCOUNT: "0.70"  # 价格错误: 比同款中位价便宜 70% 以上
           DEAL_MIN_DISCOUNT: "0.55"   # 普通优惠: 便宜 55% 以上
-          ERROR_MIN_MARKET: "100"     # 同款中位价低于 100 不看
-          DEAL_MIN_MARKET: "100"
+          HIGH_MIN_MARKET: "100"      # 高单价: 同款中位价低于 100 不看
+          LOW_MIN_MARKET: "20"        # 低价位品牌: 同款中位价低于 20 不看
+          MAX_RUN_MIN: "25"           # 单次最多跑 25 分钟，关键词随机轮换
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
           TG_CHAT: ${{ secrets.TG_CHAT }}
